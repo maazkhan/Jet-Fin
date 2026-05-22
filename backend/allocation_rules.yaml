@@ -1,0 +1,120 @@
+# ============================================================================
+# FinOps Allocation Rules
+#
+# Rules are evaluated in priority order (lowest number wins) per dimension.
+# A single event can match rules across multiple dimensions simultaneously
+# (team, project, cost_center) — each dimension resolved independently.
+#
+# Supported conditions (all keys in a rule are ANDed):
+#   has_tag: <key>                          tag key exists and is non-null
+#   tag_value:  {key: <k>, value: <v>}      exact match
+#   tag_value2: {key: <k>, value: <v>}      second exact match (AND with tag_value)
+#   tag_regex:  {key: <k>, pattern: <re>}   fullmatch regex on tag value
+#   resource_id_matches: <re>               regex search on resource_id
+#   service_matches: <re>                   case-insensitive regex on service
+#   provider_matches: <aws|azure|ai>        exact provider match
+#   environment_is: <dev|staging|prod>      matches env or environment tag
+#
+# Supported actions:
+#   allocate_to_team:        {tag_key: owner_team, default: <name>}
+#   allocate_to_project:     {tag_key: project,    default: <name>}
+#   allocate_to_cost_center: {tag_key: cost_center, default: <name>}
+#   allocate_to_entity:      {entity_type: team|project|cost_center, entity_id: <name>}
+#   split_percentage:        {splits: [{entity_type, entity_id, percent}, ...]}
+#   mark_unallocated:        {}
+# ============================================================================
+
+rules:
+
+  # ==========================================================================
+  # TIER 1 — Direct attribution by tags
+  # Trust explicit tags unconditionally.
+  # ==========================================================================
+
+  - name: direct-team-tag
+    priority: 10
+    description: "Allocate to team named in owner_team tag"
+    conditions:
+      has_tag: owner_team
+    action: allocate_to_team
+    action_params:
+      tag_key: owner_team
+
+  - name: direct-project-tag
+    priority: 20
+    description: "Allocate to project named in project tag"
+    conditions:
+      has_tag: project
+    action: allocate_to_project
+    action_params:
+      tag_key: project
+
+  - name: direct-cost-center-tag
+    priority: 30
+    description: "Allocate to cost center named in cost_center tag"
+    conditions:
+      has_tag: cost_center
+    action: allocate_to_cost_center
+    action_params:
+      tag_key: cost_center
+
+  # ==========================================================================
+  # TIER 2 — Business-mapping rules
+  # Derive allocation from combinations of tags when direct tags are absent.
+  # ==========================================================================
+
+  - name: env-prod-project-ai-hub-to-platform
+    priority: 40
+    description: "If env=prod and project=ai-hub, allocate to platform team"
+    conditions:
+      tag_value:  {key: env,     value: prod}
+      tag_value2: {key: project, value: ai-hub}
+    action: allocate_to_team
+    action_params:
+      tag_key: owner_team
+      default: platform
+
+  - name: no-owner-tag-resource-group-regex-to-cost-center
+    priority: 50
+    description: "Azure resource_group regex match — allocate to untagged-azure cost center"
+    conditions:
+      tag_regex: {key: resource_group, pattern: 'rg-.*'}
+    action: allocate_to_cost_center
+    action_params:
+      tag_key: cost_center
+      default: untagged-azure
+
+  # ==========================================================================
+  # TIER 3 — Fallback rules when tags are missing
+  # ==========================================================================
+
+  - name: fallback-env-to-team
+    priority: 60
+    description: "No owner_team or project — derive team from env tag"
+    conditions:
+      has_tag: env
+    action: allocate_to_team
+    action_params:
+      tag_key: owner_team
+      default: platform
+
+  - name: fallback-ai-provider
+    priority: 70
+    description: "AI events without project tag — allocate to project_id tag or ai-untagged"
+    conditions:
+      provider_matches: ai
+    action: allocate_to_project
+    action_params:
+      tag_key: project_id
+      default: ai-untagged
+
+  # ==========================================================================
+  # TIER 4 — Catch-all
+  # ==========================================================================
+
+  - name: fallback-unallocated
+    priority: 80
+    description: "No rule matched — mark as unallocated for manual review"
+    conditions: {}
+    action: mark_unallocated
+    action_params: {}

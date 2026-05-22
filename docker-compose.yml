@@ -1,0 +1,114 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: finops-db
+    environment:
+      POSTGRES_USER: finops
+      POSTGRES_PASSWORD: finops_password
+      POSTGRES_DB: finops_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finops -d finops_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Analytics Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: finops-backend
+    environment:
+      DATABASE_URL: postgresql://finops:finops_password@postgres:5432/finops_db
+      ENVIRONMENT: production
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      PYTHONPATH: /app/backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ingestion Backend
+  ingestion-backend:
+    build:
+      context: ./ingestion-backend
+      dockerfile: Dockerfile
+    container_name: finops-ingestion-backend
+    environment:
+      DATABASE_URL: postgresql://finops:finops_password@postgres:5432/finops_db
+      ENVIRONMENT: production
+      API_HOST: 0.0.0.0
+      API_PORT: 8001
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./ingestion-backend/src/app_ingest.py:/app/src/app_ingest.py
+      - ./ingestion-backend/src/api:/app/src/api
+      - ./backend/src/database:/app/src/database:ro
+      - ./backend/src/models.py:/app/src/models.py:ro
+      - ./backend/src/ingestion:/app/src/ingestion:ro
+      - ./backend/src/allocation:/app/src/allocation:ro
+      - ./backend/src/utils:/app/src/utils:ro
+      - ./backend/src/scheduler:/app/src/scheduler:ro
+      - ./backend/src/anomaly:/app/src/anomaly:ro
+      - ./backend/allocation_rules.yaml:/app/allocation_rules.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Frontend Dashboard
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_ANALYTICS_API_URL: http://localhost:8000
+        REACT_APP_INGEST_API_URL: http://localhost:8001
+        REACT_APP_API_URL: http://localhost:8000
+    container_name: finops-frontend
+    environment:
+      REACT_APP_ANALYTICS_API_URL: http://localhost:8000
+      REACT_APP_INGEST_API_URL: http://localhost:8001
+      REACT_APP_API_URL: http://localhost:8000
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+      - ingestion-backend
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 15s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  postgres_data:
+
+networks:
+  default:
+    name: finops-network
